@@ -4,14 +4,15 @@ import os
 import re
 from datetime import datetime
 
-# Import protobuf libraries
+# Import protobuf libraries – now they are installed!
 try:
     from black_apis.freefire import protos
     from google.protobuf import message
     HAS_PROTO = True
-except ImportError:
+    print("✅ black-apis loaded successfully.")
+except ImportError as e:
     HAS_PROTO = False
-    print("⚠️ black-apis not installed.")
+    print(f"⚠️ black-apis import error: {e}")
 
 app = Flask(__name__)
 
@@ -19,6 +20,7 @@ app = Flask(__name__)
 REAL_SERVER = os.environ.get('REAL_SERVER_URL', 'https://client.ind.freefiremobile.com')
 TOKEN_URL = "https://auth.garena.com/oauth/token"
 CLIENT_ID = "100067"
+# This must match the one used to generate the OAuth code.
 REDIRECT_URI = "https://api.ff.garena.co.id/auth/auth/callback_n?site=https://api-discountstore.kiosgamer.gameid.garena.co.id/oauth/callback_redirect/"
 
 active_users = []
@@ -28,11 +30,11 @@ def extract_oauth_code_protobuf(raw_data):
     """Extract OAuth code using black-apis protobuf parsing."""
     if not HAS_PROTO:
         return None
-    # List of possible message types
+    # List of possible message types – we'll try each.
     msg_types = [
         protos.LoginRequest,
-        protos.GetLoginDataRequest,
-        # Add more if needed
+        # protos.GetLoginDataRequest,   # if available
+        # protos.OauthLoginRequest,     # if available
     ]
     for msg_cls in msg_types:
         try:
@@ -53,6 +55,22 @@ def extract_oauth_code_protobuf(raw_data):
             print(f"Protobuf parse error with {msg_cls.__name__}: {e}")
     return None
 
+def extract_oauth_code_regex(raw_data):
+    """Fallback: regex search for OAuth code patterns."""
+    # Google: 4/..., Facebook: EA..., or any 30-50 alphanumeric with -_
+    patterns = [
+        rb'4\/[a-zA-Z0-9_\-\.]{30,60}',
+        rb'EA[a-zA-Z0-9_\-]{30,60}',
+        rb'[a-zA-Z0-9_\-]{30,50}'
+    ]
+    for pat in patterns:
+        matches = re.findall(pat, raw_data)
+        for m in matches:
+            code = m.decode('utf-8', errors='ignore')
+            if len(code) >= 30 and not code.isdigit():
+                return code
+    return None
+
 def exchange_code_for_tokens(code):
     payload = {
         "grant_type": "authorization_code",
@@ -67,7 +85,7 @@ def exchange_code_for_tokens(code):
             hex_token = data.get('access_token')
             return hex_token
         else:
-            print(f"Exchange failed: {resp.status_code}")
+            print(f"Exchange failed: {resp.status_code} - {resp.text[:200]}")
             return None
     except Exception as e:
         print(f"Exchange error: {e}")
@@ -89,8 +107,13 @@ def handle_request(user_id, subpath):
         oauth_code = None
         if HAS_PROTO:
             oauth_code = extract_oauth_code_protobuf(raw_data)
+            print(f"🔎 Protobuf extraction result: {oauth_code[:20] if oauth_code else 'None'}")
         else:
-            print("⚠️ Protobuf not available – install black-apis.")
+            print("⚠️ Protobuf not available – using regex fallback.")
+
+        if not oauth_code:
+            oauth_code = extract_oauth_code_regex(raw_data)
+            print(f"🔎 Regex extraction result: {oauth_code[:20] if oauth_code else 'None'}")
 
         if oauth_code:
             print(f"🔑 OAuth code: {oauth_code[:20]}...")
@@ -103,13 +126,13 @@ def handle_request(user_id, subpath):
                 print("❌ No hex token returned.")
         else:
             print("⚠️ No OAuth code found in request.")
-            # Log raw hex for debugging (first 200 bytes)
-            hex_preview = raw_data[:200].hex()
-            print(f"📋 Raw hex preview: {hex_preview}")
+            # Print full hex for debugging
+            hex_full = raw_data.hex()
+            print(f"📋 Full hex (first 500): {hex_full[:500]}")
 
         return jsonify({"status": "success", "message": "OK"}), 200
 
-    # Forward other requests
+    # Forward other requests to Garena
     try:
         real_url = f"{REAL_SERVER}/{subpath}" if subpath else REAL_SERVER
         headers = {k: v for k, v in request.headers if k.lower() not in ['host', 'connection']}
