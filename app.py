@@ -4,15 +4,31 @@ import os
 import re
 from datetime import datetime
 
-# Import protobuf libraries – now they are installed!
+# ─── TRY TO IMPORT black-apis ──────────────────────────────────
+HAS_PROTO = False
+protos = None
+
 try:
     from black_apis.freefire import protos
-    from google.protobuf import message
     HAS_PROTO = True
-    print("✅ black-apis loaded successfully.")
-except ImportError as e:
-    HAS_PROTO = False
-    print(f"⚠️ black-apis import error: {e}")
+    print("✅ Imported black_apis.freefire.protos")
+except ImportError as e1:
+    print(f"⚠️ Import error (black_apis.freefire.protos): {e1}")
+    try:
+        import black_apis
+        print(f"✅ black_apis version: {black_apis.__version__ if hasattr(black_apis, '__version__') else 'unknown'}")
+        # Try to find the protos module
+        if hasattr(black_apis, 'freefire'):
+            if hasattr(black_apis.freefire, 'protos'):
+                protos = black_apis.freefire.protos
+                HAS_PROTO = True
+                print("✅ Found black_apis.freefire.protos via attribute")
+            else:
+                print("⚠️ black_apis.freefire has no 'protos'")
+        else:
+            print("⚠️ black_apis has no 'freefire'")
+    except ImportError as e2:
+        print(f"⚠️ Cannot import black_apis at all: {e2}")
 
 app = Flask(__name__)
 
@@ -20,17 +36,17 @@ app = Flask(__name__)
 REAL_SERVER = os.environ.get('REAL_SERVER_URL', 'https://client.ind.freefiremobile.com')
 TOKEN_URL = "https://auth.garena.com/oauth/token"
 CLIENT_ID = "100067"
-# This must match the one used to generate the OAuth code.
 REDIRECT_URI = "https://api.ff.garena.co.id/auth/auth/callback_n?site=https://api-discountstore.kiosgamer.gameid.garena.co.id/oauth/callback_redirect/"
 
 active_users = []
 # ─────────────────────────────────────────────────────────────────
 
 def extract_oauth_code_protobuf(raw_data):
-    """Extract OAuth code using black-apis protobuf parsing."""
-    if not HAS_PROTO:
+    """Try to extract OAuth code using protobuf if available."""
+    if not HAS_PROTO or protos is None:
         return None
     # List of possible message types – we'll try each.
+    # These are based on common Free Fire protobuf messages.
     msg_types = [
         protos.LoginRequest,
         # protos.GetLoginDataRequest,   # if available
@@ -57,7 +73,6 @@ def extract_oauth_code_protobuf(raw_data):
 
 def extract_oauth_code_regex(raw_data):
     """Fallback: regex search for OAuth code patterns."""
-    # Google: 4/..., Facebook: EA..., or any 30-50 alphanumeric with -_
     patterns = [
         rb'4\/[a-zA-Z0-9_\-\.]{30,60}',
         rb'EA[a-zA-Z0-9_\-]{30,60}',
@@ -104,8 +119,12 @@ def handle_request(user_id, subpath):
         raw_data = request.get_data()
         print(f"📦 Received {len(raw_data)} bytes")
 
+        # Print first 200 bytes as hex for debugging
+        hex_preview = raw_data[:200].hex()
+        print(f"📋 Hex preview (200): {hex_preview}")
+
         oauth_code = None
-        if HAS_PROTO:
+        if HAS_PROTO and protos is not None:
             oauth_code = extract_oauth_code_protobuf(raw_data)
             print(f"🔎 Protobuf extraction result: {oauth_code[:20] if oauth_code else 'None'}")
         else:
@@ -126,9 +145,9 @@ def handle_request(user_id, subpath):
                 print("❌ No hex token returned.")
         else:
             print("⚠️ No OAuth code found in request.")
-            # Print full hex for debugging
-            hex_full = raw_data.hex()
-            print(f"📋 Full hex (first 500): {hex_full[:500]}")
+            # Print full hex for deeper analysis
+            full_hex = raw_data.hex()
+            print(f"📋 Full hex (first 500): {full_hex[:500]}")
 
         return jsonify({"status": "success", "message": "OK"}), 200
 
