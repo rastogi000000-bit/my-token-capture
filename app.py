@@ -17,6 +17,7 @@ def proxy(user_id, subpath):
 
     print(f"\n🔹 Proxying {request.method} {real_url}")
 
+    # Prepare headers – remove host/connection, set correct Host
     headers = {k: v for k, v in request.headers if k.lower() not in ['host', 'connection']}
     headers.pop('Content-Length', None)
     headers['Host'] = REAL_SERVER.replace('https://', '').split('/')[0]
@@ -37,22 +38,35 @@ def proxy(user_id, subpath):
 
     print(f"   Response status: {resp.status_code}")
 
-    # ── Log full response ──
+    # ── Try to parse as JSON ──
+    found_hex = False
     try:
         data = resp.json()
         print(f"   JSON response (first 500 chars):\n{json.dumps(data, indent=2)[:500]}")
         # Search for any key with 'token' or 'access'
         for key in data:
             if 'token' in key.lower() or 'access' in key.lower():
-                print(f"🔑 Found '{key}': {data[key][:40]}...")
+                val = data[key]
+                if isinstance(val, str) and len(val) == 64 and re.match(r'^[0-9a-fA-F]{64}$', val):
+                    print(f"🎯 HEX ACCESS TOKEN (JSON): {val}")
+                    found_hex = True
+                else:
+                    print(f"🔑 Found '{key}': {str(val)[:40]}...")
     except:
+        # Not JSON – log as raw and also search binary for hex
         raw = resp.text
         print(f"   Raw response (first 300 chars): {raw[:300]}...")
-        # Also search hex pattern
-        hex_pattern = re.compile(r'[0-9a-fA-F]{64}')
-        matches = hex_pattern.findall(raw)
+
+        # ── SEARCH BINARY CONTENT FOR 64‑CHAR HEX ──
+        hex_pattern = re.compile(rb'[0-9a-fA-F]{64}')
+        matches = hex_pattern.findall(resp.content)
         if matches:
-            print(f"✅ HEX TOKEN FOUND IN RAW: {matches[0]}")
+            for match in matches:
+                hex_token = match.decode()
+                print(f"🎯 HEX ACCESS TOKEN FOUND IN BINARY: {hex_token}")
+                found_hex = True
+        else:
+            print("   No 64‑hex token found in binary response.")
 
     # ── Return the real server's response ──
     excluded_headers = ['content-encoding', 'content-length', 'transfer-encoding', 'connection']
