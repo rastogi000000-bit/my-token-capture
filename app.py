@@ -2,16 +2,11 @@ from flask import Flask, request, jsonify, Response
 import requests
 import os
 import re
-import json
-from datetime import datetime
 
 app = Flask(__name__)
 
 # ─── CONFIGURATION ──────────────────────────────────────────────
-# The real Garena server URL (from your earlier JSON)
 REAL_SERVER = os.environ.get('REAL_SERVER_URL', 'https://client.ind.freefiremobile.com')
-
-# Telegram alerts (optional) – set these in Render environment variables
 TELEGRAM_BOT_TOKEN = os.environ.get('8199355245:AAEXNVzd9lZUv5fvT9axmJ3rNbcSPUh56QA', '')
 TELEGRAM_CHAT_ID = os.environ.get('6261108215', '')
 # ─────────────────────────────────────────────────────────────────
@@ -29,20 +24,21 @@ def send_telegram(msg):
 @app.route('/user/<user_id>/<path:subpath>', methods=['GET', 'POST', 'PUT', 'DELETE', 'PATCH'])
 def proxy(user_id, subpath):
     """
-    Forward all requests to the real Garena server,
-    capture the response, extract the hex access token.
+    Forward to REAL_SERVER with the subpath only (strip /user/<user_id>/).
     """
-    # ── Build the real URL ──
+    # ── Build real URL – just the subpath ──
     if subpath:
-        real_url = f"{REAL_SERVER}/user/{user_id}/{subpath}"
+        real_url = f"{REAL_SERVER}/{subpath}"
     else:
-        real_url = f"{REAL_SERVER}/user/{user_id}/"
+        real_url = f"{REAL_SERVER}/"
 
     print(f"\n🔹 Proxying {request.method} {real_url}")
 
     # ── Forward request ──
     headers = {k: v for k, v in request.headers if k.lower() not in ['host', 'connection']}
-    headers.pop('Content-Length', None)  # let requests set it
+    headers.pop('Content-Length', None)
+    # Set Host header to the real server's host
+    headers['Host'] = REAL_SERVER.replace('https://', '').split('/')[0]
 
     try:
         resp = requests.request(
@@ -75,7 +71,6 @@ def proxy(user_id, subpath):
         else:
             print("   No 'access_token' in JSON response.")
     except:
-        # Not JSON – search raw text for 64‑char hex
         raw_body = resp.text
         hex_pattern = re.compile(r'[0-9a-fA-F]{64}')
         matches = hex_pattern.findall(raw_body)
@@ -90,7 +85,7 @@ def proxy(user_id, subpath):
         else:
             print("   No hex token found in response.")
 
-    # ── Return the real server's response back to the game ──
+    # ── Return real server response ──
     excluded_headers = ['content-encoding', 'content-length', 'transfer-encoding', 'connection']
     response_headers = [(k, v) for k, v in resp.raw.headers.items() if k.lower() not in excluded_headers]
 
